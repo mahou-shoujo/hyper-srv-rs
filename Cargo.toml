@@ -1,0 +1,19 @@
+[package]
+name = "hyper-srv"
+description = "A wrapper around Hyper's connector with ability to resolve SRV records."
+edition = "2018"
+version = "0.1.0"
+authors = ["Eugene Palmoff <mahou@shoujo.pw>"]
+license = "MIT"
+repository = "https://github.com/mahou-shoujo/hyper-srv-rs.git"
+homepage = "https://github.com/mahou-shoujo/hyper-srv-rs.git"
+readme = "README.md"
+categories = []
+keywords = []
+
+[dependencies]
+futures = "0.1"
+http = "0.1"
+hyper = "0.12"
+tokio = "0.1"
+trust-dns-resolver = "0.12"
