@@ -13,7 +13,7 @@ use trust_dns_resolver::{
 
 pub struct HttpServiceConnector<C> {
     inner: Arc<C>,
-    resolver: AsyncResolver,
+    resolver: Option<AsyncResolver>,
 }
 
 impl<C> Connect for HttpServiceConnector<C>
@@ -27,18 +27,14 @@ where
     type Future = HttpServiceConnecting<C>;
 
     fn connect(&self, dst: Destination) -> Self::Future {
-        match dst.port() {
-            Some(_) => {
-                HttpServiceConnecting::Inner {
-                    fut: self.inner.connect(dst),
-                }
+        match (&self.resolver, dst.port()) {
+            (_, Some(_)) | (None, _) => HttpServiceConnecting::Inner {
+                fut: self.inner.connect(dst),
             },
-            None => {
-                HttpServiceConnecting::Preresolve {
-                    connector: self.inner.clone(),
-                    fut: self.resolver.lookup_srv(dst.host()),
-                    dst: Some(dst),
-                }
+            (Some(resolver), None) => HttpServiceConnecting::Preresolve {
+                connector: self.inner.clone(),
+                fut: resolver.lookup_srv(dst.host()),
+                dst: Some(dst),
             },
         }
     }
@@ -49,12 +45,14 @@ where
     C: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("HttpServiceConnector").field("inner", &self.inner).finish()
+        f.debug_struct("HttpServiceConnector")
+            .field("inner", &self.inner)
+            .finish()
     }
 }
 
 impl<C> HttpServiceConnector<C> {
-    pub fn new(inner: C, resolver: AsyncResolver) -> Self {
+    pub fn new(inner: C, resolver: Option<AsyncResolver>) -> Self {
         HttpServiceConnector {
             inner: Arc::new(inner),
             resolver,
@@ -92,6 +90,7 @@ impl HttpServiceError {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum HttpServiceConnecting<C>
 where
     C: Connect,
@@ -120,18 +119,17 @@ where
                 fut,
                 dst,
             } => {
-                let response = try_ready!(fut.poll().map(|res| res.map(|response| Some(response))).or_else(|err| {
+                let response = try_ready!(fut.poll().map(|res| res.map(Some)).or_else(|err| {
                     match err.kind() {
-                        ResolveErrorKind::NoRecordsFound {
-                            ..
-                        } => Ok(Async::Ready(None)),
-                        _ => {
-                            return Err(HttpServiceError::TrustResolver(err));
-                        },
+                        ResolveErrorKind::NoRecordsFound { .. } => Ok(Async::Ready(None)),
+                        _ => Err(HttpServiceError::TrustResolver(err)),
                     }
                 }));
                 let dst = dst.take().expect("double ready on preresolve future");
-                let dst = match response.as_ref().and_then(|response| response.iter().next()) {
+                let dst = match response
+                    .as_ref()
+                    .and_then(|response| response.iter().next())
+                {
                     Some(srv) => {
                         let authority = format!("{}:{}", srv.target(), srv.port());
                         let uri = Uri::builder()
@@ -141,7 +139,7 @@ where
                             .build()
                             .map_err(HttpServiceError::HyperHttp)?;
                         Destination::try_from_uri(uri).map_err(HttpServiceError::Hyper)?
-                    },
+                    }
                     None => dst,
                 };
                 {
@@ -150,10 +148,8 @@ where
                     };
                 }
                 self.poll()
-            },
-            HttpServiceConnecting::Inner {
-                fut,
-            } => fut.poll().map_err(HttpServiceError::inner),
+            }
+            HttpServiceConnecting::Inner { fut } => fut.poll().map_err(HttpServiceError::inner),
         }
     }
 }
@@ -168,7 +164,8 @@ fn test() {
         .block_on(lazy(|| {
             let (resolver, resolver_fut) = AsyncResolver::from_system_conf().unwrap();
             tokio::spawn(resolver_fut);
-            let client = Client::builder().build::<_, Body>(HttpServiceConnector::new(HttpConnector::new(1), resolver));
+            let client = Client::builder()
+                .build::<_, Body>(HttpServiceConnector::new(HttpConnector::new(1), resolver));
             client.get(Uri::from_static("http://_http._tcp.mxtoolbox.com"))
         }))
         .unwrap();
