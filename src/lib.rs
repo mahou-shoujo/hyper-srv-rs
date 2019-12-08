@@ -1,3 +1,7 @@
+//! Fuck that for now.
+
+#![deny(missing_docs)]
+
 use futures::{try_ready, Async, Future, Poll};
 use http::Error as HyperHttpError;
 use hyper::{
@@ -11,49 +15,63 @@ use trust_dns_resolver::{
     AsyncResolver, BackgroundLookup,
 };
 
-pub struct HttpServiceConnector<C> {
+/// A wrapper around Hyper's [`Connect`]or with ability to preresolve SRV DNS records
+/// before supplying resulting `host:port` pair to the underlying connector.
+///
+/// [`Connect`]: ../hyper/client/connect/trait.Connect.html
+pub struct ServiceConnector<C> {
     inner: Arc<C>,
     resolver: Option<AsyncResolver>,
 }
 
-impl<C> Connect for HttpServiceConnector<C>
+impl<C> Connect for ServiceConnector<C>
 where
     C: Connect,
 {
     type Transport = C::Transport;
 
-    type Error = HttpServiceError;
+    type Error = ServiceError;
 
-    type Future = HttpServiceConnecting<C>;
+    type Future = ServiceConnecting<C>;
 
     fn connect(&self, dst: Destination) -> Self::Future {
-        match (&self.resolver, dst.port()) {
-            (_, Some(_)) | (None, _) => HttpServiceConnecting::Inner {
-                fut: self.inner.connect(dst),
+        let fut = match &self.resolver {
+            Some(resolver) if dst.port().is_some() => {
+                ServiceConnectingKind::Preresolve {
+                    connector: self.inner.clone(),
+                    fut: resolver.lookup_srv(dst.host()),
+                    dst: Some(dst),
+                }
             },
-            (Some(resolver), None) => HttpServiceConnecting::Preresolve {
-                connector: self.inner.clone(),
-                fut: resolver.lookup_srv(dst.host()),
-                dst: Some(dst),
+            _ => {
+                ServiceConnectingKind::Inner {
+                    fut: self.inner.connect(dst),
+                }
             },
-        }
+        };
+        ServiceConnecting(fut)
     }
 }
 
-impl<C> fmt::Debug for HttpServiceConnector<C>
+impl<C> fmt::Debug for ServiceConnector<C>
 where
     C: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("HttpServiceConnector")
-            .field("inner", &self.inner)
-            .finish()
+        f.debug_struct("ServiceConnector").field("inner", &self.inner).finish()
     }
 }
 
-impl<C> HttpServiceConnector<C> {
+impl<C> ServiceConnector<C> {
+    /// Creates a new instance of [`ServiceConnector`] with provided connector and
+    /// optional DNS resolver. If the resolver is set to None all connections will be
+    /// handled directly by the underlying connector. This allows to toggle SRV resolving
+    /// mechanism without changing a type of connector used
+    /// in a client (as it must be named and can not even be made into a trait object).
+    ///
+    /// [`ServiceConnector`]: struct.ServiceConnector.html
     pub fn new(inner: C, resolver: Option<AsyncResolver>) -> Self {
-        HttpServiceConnector {
+        ServiceConnector {
             inner: Arc::new(inner),
             resolver,
         }
@@ -61,37 +79,70 @@ impl<C> HttpServiceConnector<C> {
 }
 
 #[derive(Debug)]
-pub enum HttpServiceError {
+enum ServiceErrorKind {
     HyperHttp(HyperHttpError),
     Hyper(HyperError),
-    TrustResolver(ResolveError),
+    Resolve(ResolveError),
     Inner(Box<dyn Error + Send + Sync>),
 }
 
-impl fmt::Display for HttpServiceError {
+/// An error type used in [`ServiceConnector`].
+///
+/// [`ServiceConnector`]: struct.ServiceConnector.html
+#[derive(Debug)]
+pub struct ServiceError(ServiceErrorKind);
+
+impl From<HyperHttpError> for ServiceError {
+    fn from(error: HyperHttpError) -> Self {
+        ServiceError(ServiceErrorKind::HyperHttp(error))
+    }
+}
+
+impl From<HyperError> for ServiceError {
+    fn from(error: HyperError) -> Self {
+        ServiceError(ServiceErrorKind::Hyper(error))
+    }
+}
+
+impl From<ResolveError> for ServiceError {
+    fn from(error: ResolveError) -> Self {
+        ServiceError(ServiceErrorKind::Resolve(error))
+    }
+}
+
+impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            HttpServiceError::HyperHttp(err) => fmt::Display::fmt(err, f),
-            HttpServiceError::Hyper(err) => fmt::Display::fmt(err, f),
-            HttpServiceError::TrustResolver(err) => fmt::Display::fmt(err, f),
-            HttpServiceError::Inner(err) => fmt::Display::fmt(err, f),
+        match &self.0 {
+            ServiceErrorKind::HyperHttp(err) => fmt::Display::fmt(err, f),
+            ServiceErrorKind::Hyper(err) => fmt::Display::fmt(err, f),
+            ServiceErrorKind::Resolve(err) => fmt::Display::fmt(err, f),
+            ServiceErrorKind::Inner(err) => fmt::Display::fmt(err, f),
         }
     }
 }
 
-impl Error for HttpServiceError {}
+impl Error for ServiceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.0 {
+            ServiceErrorKind::HyperHttp(err) => Some(err),
+            ServiceErrorKind::Hyper(err) => Some(err),
+            ServiceErrorKind::Inner(err) => Some(err.as_ref()),
+            ServiceErrorKind::Resolve(_) => None,
+        }
+    }
+}
 
-impl HttpServiceError {
-    pub fn inner<E>(inner: E) -> Self
+impl ServiceError {
+    fn inner<E>(inner: E) -> Self
     where
         E: Into<Box<dyn Error + Send + Sync>>,
     {
-        HttpServiceError::Inner(inner.into())
+        ServiceError(ServiceErrorKind::Inner(inner.into()))
     }
 }
 
 #[allow(clippy::large_enum_variant)]
-pub enum HttpServiceConnecting<C>
+enum ServiceConnectingKind<C>
 where
     C: Connect,
 {
@@ -105,69 +156,68 @@ where
     },
 }
 
-impl<C> Future for HttpServiceConnecting<C>
+impl<C> fmt::Debug for ServiceConnectingKind<C>
+where
+    C: Connect,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("ServiceConnectingKind").finish()
+    }
+}
+
+/// This future represents a connection in progress returned by [`ServiceConnector`].
+///
+/// [`ServiceConnector`]: struct.ServiceConnector.html
+#[derive(Debug)]
+pub struct ServiceConnecting<C>(ServiceConnectingKind<C>)
+where
+    C: Connect;
+
+impl<C> Future for ServiceConnecting<C>
 where
     C: Connect,
 {
     type Item = <C::Future as Future>::Item;
-    type Error = HttpServiceError;
+    type Error = ServiceError;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self {
-            HttpServiceConnecting::Preresolve {
+        match &mut self.0 {
+            ServiceConnectingKind::Preresolve {
                 connector,
                 fut,
                 dst,
             } => {
                 let response = try_ready!(fut.poll().map(|res| res.map(Some)).or_else(|err| {
                     match err.kind() {
-                        ResolveErrorKind::NoRecordsFound { .. } => Ok(Async::Ready(None)),
-                        _ => Err(HttpServiceError::TrustResolver(err)),
+                        ResolveErrorKind::NoRecordsFound {
+                            ..
+                        } => Ok(Async::Ready(None)),
+                        _ => Err(ServiceError(ServiceErrorKind::Resolve(err))),
                     }
                 }));
                 let dst = dst.take().expect("double ready on preresolve future");
-                let dst = match response
-                    .as_ref()
-                    .and_then(|response| response.iter().next())
-                {
+                let dst = match response.as_ref().and_then(|response| response.iter().next()) {
                     Some(srv) => {
                         let authority = format!("{}:{}", srv.target(), srv.port());
                         let uri = Uri::builder()
                             .scheme(dst.scheme())
                             .authority(authority.as_str())
                             .path_and_query("/")
-                            .build()
-                            .map_err(HttpServiceError::HyperHttp)?;
-                        Destination::try_from_uri(uri).map_err(HttpServiceError::Hyper)?
-                    }
+                            .build()?;
+                        Destination::try_from_uri(uri)?
+                    },
                     None => dst,
                 };
                 {
-                    *self = HttpServiceConnecting::Inner {
+                    *self = ServiceConnecting(ServiceConnectingKind::Inner {
                         fut: connector.connect(dst),
-                    };
+                    });
                 }
                 self.poll()
-            }
-            HttpServiceConnecting::Inner { fut } => fut.poll().map_err(HttpServiceError::inner),
+            },
+            ServiceConnectingKind::Inner {
+                fut,
+            } => fut.poll().map_err(ServiceError::inner),
         }
     }
-}
-
-#[test]
-fn test() {
-    use futures::future::lazy;
-    use hyper::{client::HttpConnector, Body, Client, StatusCode};
-    use tokio::runtime::Runtime;
-    let mut runtime = Runtime::new().unwrap();
-    let response = runtime
-        .block_on(lazy(|| {
-            let (resolver, resolver_fut) = AsyncResolver::from_system_conf().unwrap();
-            tokio::spawn(resolver_fut);
-            let client = Client::builder()
-                .build::<_, Body>(HttpServiceConnector::new(HttpConnector::new(1), resolver));
-            client.get(Uri::from_static("http://_http._tcp.mxtoolbox.com"))
-        }))
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN); // CloudFront returns 403 but at least it works.
 }
