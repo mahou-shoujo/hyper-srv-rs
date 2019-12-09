@@ -1,5 +1,5 @@
 ﻿## hyper-srv
- [![](https://travis-ci.org/mahou-shoujo/hyper-srv-rs.svg)](https://travis-ci.org/mahou-shoujo/hyper-srv-rs)
+[![Build Status](https://travis-ci.com/mahou-shoujo/hyper-srv-rs.svg?branch=master)](https://travis-ci.com/mahou-shoujo/hyper-srv-rs)
 
 This crate provides a wrapper around Hyper's connector with ability to preresolve SRV DNS records
 before supplying resulting `host:port` pair to the underlying connector.
