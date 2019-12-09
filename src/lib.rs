@@ -36,7 +36,7 @@ where
 
     fn connect(&self, dst: Destination) -> Self::Future {
         let fut = match &self.resolver {
-            Some(resolver) if dst.port().is_some() => {
+            Some(resolver) if dst.port().is_none() => {
                 ServiceConnectingKind::Preresolve {
                     connector: self.inner.clone(),
                     fut: resolver.lookup_srv(dst.host()),
