@@ -4,8 +4,7 @@ use hyper_srv::ServiceConnector;
 use tokio::runtime::Runtime;
 use trust_dns_resolver::AsyncResolver;
 
-#[test]
-fn probe() {
+pub fn main() {
     let mut runtime = Runtime::new().unwrap();
     let response = runtime
         .block_on(lazy(|| {
