@@ -11,13 +11,14 @@
 
 #![deny(missing_docs)]
 
-use futures::{try_ready, Async, Future, Poll};
-use http::Error as HyperHttpError;
-use hyper::{
-    client::connect::{Connect, Destination},
-    Error as HyperError, Uri,
+use futures::{
+    ready,
+    task::{Context, Poll},
+    Future,
 };
-use std::{error::Error, fmt, sync::Arc};
+use hyper::{client::connect::Connection, service::Service, Uri};
+use std::{error::Error, fmt, net::SocketAddr, pin::Pin};
+use tokio::io::{AsyncRead, AsyncWrite};
 use trust_dns_resolver::{
     error::{ResolveError, ResolveErrorKind},
     lookup::SrvLookupFuture,
@@ -28,46 +29,44 @@ use trust_dns_resolver::{
 /// before supplying resulting `host:port` pair to the underlying connector.
 ///
 /// [`Connect`]: ../hyper/client/connect/trait.Connect.html
+#[derive(Debug, Clone)]
 pub struct ServiceConnector<C> {
-    inner: Arc<C>,
     resolver: Option<AsyncResolver>,
+    inner: C,
 }
 
-impl<C> Connect for ServiceConnector<C>
+impl<C> Service<Uri> for ServiceConnector<C>
 where
-    C: Connect,
+    C: Service<Uri> + Clone + Unpin,
+    C::Response: AsyncRead + AsyncWrite + Connection + Unpin + Send + 'static,
+    C::Error: Into<Box<dyn Error + Send + Sync>>,
+    C::Future: Unpin + Send,
 {
-    type Transport = C::Transport;
-
+    type Response = C::Response;
     type Error = ServiceError;
-
     type Future = ServiceConnecting<C>;
 
-    fn connect(&self, dst: Destination) -> Self::Future {
-        let fut = match &self.resolver {
-            Some(resolver) if dst.port().is_none() => {
+    fn poll_ready(&mut self, ctx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(ctx).map_err(ServiceError::inner)
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let fut = match (&self.resolver, uri.host(), uri.port()) {
+            (Some(resolver), Some(host), None) => {
+                let fut = resolver.lookup_srv(host);
                 ServiceConnectingKind::Preresolve {
-                    connector: self.inner.clone(),
-                    fut: resolver.lookup_srv(dst.host()),
-                    dst: Some(dst),
+                    inner: self.inner.clone(),
+                    uri: Some(uri),
+                    fut,
                 }
             },
             _ => {
                 ServiceConnectingKind::Inner {
-                    fut: self.inner.connect(dst),
+                    fut: self.inner.call(uri),
                 }
             },
         };
         ServiceConnecting(fut)
-    }
-}
-
-impl<C> fmt::Debug for ServiceConnector<C>
-where
-    C: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("ServiceConnector").field("inner", &self.inner).finish()
     }
 }
 
@@ -81,16 +80,14 @@ impl<C> ServiceConnector<C> {
     /// [`ServiceConnector`]: struct.ServiceConnector.html
     pub fn new(inner: C, resolver: Option<AsyncResolver>) -> Self {
         ServiceConnector {
-            inner: Arc::new(inner),
             resolver,
+            inner,
         }
     }
 }
 
 #[derive(Debug)]
 enum ServiceErrorKind {
-    HyperHttp(HyperHttpError),
-    Hyper(HyperError),
     Resolve(ResolveError),
     Inner(Box<dyn Error + Send + Sync>),
 }
@@ -101,18 +98,6 @@ enum ServiceErrorKind {
 #[derive(Debug)]
 pub struct ServiceError(ServiceErrorKind);
 
-impl From<HyperHttpError> for ServiceError {
-    fn from(error: HyperHttpError) -> Self {
-        ServiceError(ServiceErrorKind::HyperHttp(error))
-    }
-}
-
-impl From<HyperError> for ServiceError {
-    fn from(error: HyperError) -> Self {
-        ServiceError(ServiceErrorKind::Hyper(error))
-    }
-}
-
 impl From<ResolveError> for ServiceError {
     fn from(error: ResolveError) -> Self {
         ServiceError(ServiceErrorKind::Resolve(error))
@@ -122,8 +107,6 @@ impl From<ResolveError> for ServiceError {
 impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.0 {
-            ServiceErrorKind::HyperHttp(err) => fmt::Display::fmt(err, f),
-            ServiceErrorKind::Hyper(err) => fmt::Display::fmt(err, f),
             ServiceErrorKind::Resolve(err) => fmt::Display::fmt(err, f),
             ServiceErrorKind::Inner(err) => fmt::Display::fmt(err, f),
         }
@@ -133,10 +116,8 @@ impl fmt::Display for ServiceError {
 impl Error for ServiceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.0 {
-            ServiceErrorKind::HyperHttp(err) => Some(err),
-            ServiceErrorKind::Hyper(err) => Some(err),
-            ServiceErrorKind::Inner(err) => Some(err.as_ref()),
             ServiceErrorKind::Resolve(_) => None,
+            ServiceErrorKind::Inner(err) => Some(err.as_ref()),
         }
     }
 }
@@ -153,12 +134,12 @@ impl ServiceError {
 #[allow(clippy::large_enum_variant)]
 enum ServiceConnectingKind<C>
 where
-    C: Connect,
+    C: Service<Uri> + Unpin,
 {
     Preresolve {
-        connector: Arc<C>,
+        inner: C,
+        uri: Option<Uri>,
         fut: BackgroundLookup<SrvLookupFuture>,
-        dst: Option<Destination>,
     },
     Inner {
         fut: C::Future,
@@ -167,7 +148,7 @@ where
 
 impl<C> fmt::Debug for ServiceConnectingKind<C>
 where
-    C: Connect,
+    C: Service<Uri> + Unpin,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("ServiceConnectingKind").finish()
@@ -177,56 +158,70 @@ where
 /// This future represents a connection in progress returned by [`ServiceConnector`].
 ///
 /// [`ServiceConnector`]: struct.ServiceConnector.html
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct ServiceConnecting<C>(ServiceConnectingKind<C>)
 where
-    C: Connect;
+    C: Service<Uri> + Unpin;
 
 impl<C> Future for ServiceConnecting<C>
 where
-    C: Connect,
+    C: Service<Uri> + Unpin,
+    C::Response: AsyncRead + AsyncWrite + Connection + Unpin + Send + 'static,
+    C::Error: Into<Box<dyn Error + Send + Sync>>,
+    C::Future: Unpin + Send,
 {
-    type Item = <C::Future as Future>::Item;
-    type Error = ServiceError;
+    type Output = Result<C::Response, ServiceError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         match &mut self.0 {
             ServiceConnectingKind::Preresolve {
-                connector,
+                inner,
+                uri,
                 fut,
-                dst,
             } => {
-                let response = try_ready!(fut.poll().map(|res| res.map(Some)).or_else(|err| {
-                    match err.kind() {
-                        ResolveErrorKind::NoRecordsFound {
-                            ..
-                        } => Ok(Async::Ready(None)),
-                        _ => Err(ServiceError(ServiceErrorKind::Resolve(err))),
-                    }
-                }));
-                let dst = dst.take().expect("double ready on preresolve future");
-                let dst = match response.as_ref().and_then(|response| response.iter().next()) {
-                    Some(srv) => {
-                        let authority = format!("{}:{}", srv.target(), srv.port());
-                        let uri = Uri::builder()
-                            .scheme(dst.scheme())
-                            .authority(authority.as_str())
-                            .path_and_query("/")
-                            .build()?;
-                        Destination::try_from_uri(uri)?
+                let res = ready!(Pin::new(fut).poll(ctx));
+                let address = res
+                    .map(|response| {
+                        Ok(response
+                            .ip_iter()
+                            .flat_map(|ip| response.iter().map(move |srv| SocketAddr::new(ip, srv.port())))
+                            .next())
+                    })
+                    .unwrap_or_else(|err| {
+                        match err.kind() {
+                            ResolveErrorKind::NoRecordsFound {
+                                ..
+                            } => Ok(None),
+                            _whatever => Err(err),
+                        }
+                    })?;
+                let uri = uri.take().expect("double ready on preresolve future");
+                let uri = match address {
+                    Some(address) => {
+                        let authority = format!("{}:{}", address.ip(), address.port());
+                        let builder = Uri::builder().authority(authority.as_str());
+                        let builder = match uri.scheme() {
+                            Some(scheme) => builder.scheme(scheme.clone()),
+                            None => builder,
+                        };
+                        let builder = match uri.path_and_query() {
+                            Some(path_and_query) => builder.path_and_query(path_and_query.clone()),
+                            None => builder,
+                        };
+                        builder.build().map_err(ServiceError::inner)?
                     },
-                    None => dst,
+                    None => uri,
                 };
                 {
                     *self = ServiceConnecting(ServiceConnectingKind::Inner {
-                        fut: connector.connect(dst),
+                        fut: inner.call(uri),
                     });
                 }
-                self.poll()
+                self.poll(ctx)
             },
             ServiceConnectingKind::Inner {
                 fut,
-            } => fut.poll().map_err(ServiceError::inner),
+            } => Pin::new(fut).poll(ctx).map_err(ServiceError::inner),
         }
     }
 }
