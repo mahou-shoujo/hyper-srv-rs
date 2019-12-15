@@ -17,7 +17,7 @@ use futures::{
     Future,
 };
 use hyper::{client::connect::Connection, service::Service, Uri};
-use std::{error::Error, fmt, net::SocketAddr, pin::Pin};
+use std::{error::Error, fmt, pin::Pin};
 use tokio::io::{AsyncRead, AsyncWrite};
 use trust_dns_resolver::{
     error::{ResolveError, ResolveErrorKind},
@@ -180,25 +180,18 @@ where
                 fut,
             } => {
                 let res = ready!(Pin::new(fut).poll(ctx));
-                let address = res
-                    .map(|response| {
-                        Ok(response
-                            .ip_iter()
-                            .flat_map(|ip| response.iter().map(move |srv| SocketAddr::new(ip, srv.port())))
-                            .next())
-                    })
-                    .unwrap_or_else(|err| {
-                        match err.kind() {
-                            ResolveErrorKind::NoRecordsFound {
-                                ..
-                            } => Ok(None),
-                            _whatever => Err(err),
-                        }
-                    })?;
+                let response = res.map(Some).or_else(|err| {
+                    match err.kind() {
+                        ResolveErrorKind::NoRecordsFound {
+                            ..
+                        } => Ok(None),
+                        _unexpected => Err(ServiceError(ServiceErrorKind::Resolve(err))),
+                    }
+                })?;
                 let uri = uri.take().expect("double ready on preresolve future");
-                let uri = match address {
-                    Some(address) => {
-                        let authority = format!("{}:{}", address.ip(), address.port());
+                let uri = match response.as_ref().and_then(|response| response.iter().next()) {
+                    Some(srv) => {
+                        let authority = format!("{}:{}", srv.target(), srv.port());
                         let builder = Uri::builder().authority(authority.as_str());
                         let builder = match uri.scheme() {
                             Some(scheme) => builder.scheme(scheme.clone()),
