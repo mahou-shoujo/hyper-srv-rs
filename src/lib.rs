@@ -158,7 +158,7 @@ where
 /// This future represents a connection in progress returned by [`ServiceConnector`].
 ///
 /// [`ServiceConnector`]: struct.ServiceConnector.html
-// #[derive(Debug)]
+#[derive(Debug)]
 pub struct ServiceConnecting<C>(ServiceConnectingKind<C>)
 where
     C: Service<Uri> + Unpin;
