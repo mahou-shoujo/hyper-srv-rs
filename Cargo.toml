@@ -2,7 +2,7 @@
 name = "hyper-srv"
 description = "A wrapper around Hyper's connector with ability to preresolve SRV DNS records."
 edition = "2018"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Eugene Palmoff <mahou@shoujo.pw>"]
 license = "MIT"
 repository = "https://github.com/mahou-shoujo/hyper-srv-rs.git"
@@ -12,8 +12,12 @@ categories = ["http", "hyper", "hyperium", "dns", "srv"]
 keywords = ["network-programming", "web-programming"]
 
 [dependencies]
-futures = "0.1"
-http = "0.1"
-hyper = "0.12"
-tokio = "0.1"
-trust-dns-resolver = "0.12"
+futures = "0.3"
+http = "0.2"
+hyper = "0.13"
+tokio = "0.2"
+trust-dns-proto = "=0.18.0-alpha.2"
+trust-dns-resolver = "=0.18.0-alpha.2"
+
+[dev-dependencies]
+tokio = { version = "0.2", features = ["macros"] }
