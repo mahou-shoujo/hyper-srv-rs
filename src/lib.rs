@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 
 use futures::{
+    future::BoxFuture,
     ready,
     task::{Context, Poll},
     Future,
@@ -21,8 +22,8 @@ use std::{error::Error, fmt, pin::Pin};
 use tokio::io::{AsyncRead, AsyncWrite};
 use trust_dns_resolver::{
     error::{ResolveError, ResolveErrorKind},
-    lookup::SrvLookupFuture,
-    AsyncResolver, BackgroundLookup,
+    lookup::SrvLookup,
+    TokioAsyncResolver,
 };
 
 /// A wrapper around Hyper's [`Connect`]or with ability to preresolve SRV DNS records
@@ -31,7 +32,7 @@ use trust_dns_resolver::{
 /// [`Connect`]: ../hyper/client/connect/trait.Connect.html
 #[derive(Debug, Clone)]
 pub struct ServiceConnector<C> {
-    resolver: Option<AsyncResolver>,
+    resolver: Option<TokioAsyncResolver>,
     inner: C,
 }
 
@@ -52,12 +53,17 @@ where
 
     fn call(&mut self, uri: Uri) -> Self::Future {
         let fut = match (&self.resolver, uri.host(), uri.port()) {
-            (Some(resolver), Some(host), None) => {
-                let fut = resolver.lookup_srv(host);
+            (Some(resolver), Some(_), None) => {
                 ServiceConnectingKind::Preresolve {
                     inner: self.inner.clone(),
-                    uri: Some(uri),
-                    fut,
+                    fut: {
+                        let resolver = resolver.clone();
+                        Box::pin(async move {
+                            let host = uri.host().expect("host was right here, now it is gone");
+                            let resolved = resolver.srv_lookup(host).await;
+                            (resolved, uri)
+                        })
+                    },
                 }
             },
             _ => {
@@ -78,7 +84,7 @@ impl<C> ServiceConnector<C> {
     /// in a client (as it must be named and can not even be made into a trait object).
     ///
     /// [`ServiceConnector`]: struct.ServiceConnector.html
-    pub fn new(inner: C, resolver: Option<AsyncResolver>) -> Self {
+    pub fn new(inner: C, resolver: Option<TokioAsyncResolver>) -> Self {
         ServiceConnector {
             resolver,
             inner,
@@ -138,8 +144,7 @@ where
 {
     Preresolve {
         inner: C,
-        uri: Option<Uri>,
-        fut: BackgroundLookup<SrvLookupFuture>,
+        fut: BoxFuture<'static, (Result<SrvLookup, ResolveError>, Uri)>,
     },
     Inner {
         fut: C::Future,
@@ -176,10 +181,9 @@ where
         match &mut self.0 {
             ServiceConnectingKind::Preresolve {
                 inner,
-                uri,
                 fut,
             } => {
-                let res = ready!(Pin::new(fut).poll(ctx));
+                let (res, uri) = ready!(Pin::new(fut).poll(ctx));
                 let response = res.map(Some).or_else(|err| {
                     match err.kind() {
                         ResolveErrorKind::NoRecordsFound {
@@ -188,7 +192,6 @@ where
                         _unexpected => Err(ServiceError(ServiceErrorKind::Resolve(err))),
                     }
                 })?;
-                let uri = uri.take().expect("double ready on preresolve future");
                 let uri = match response.as_ref().and_then(|response| response.iter().next()) {
                     Some(srv) => {
                         let authority = format!("{}:{}", srv.target(), srv.port());
