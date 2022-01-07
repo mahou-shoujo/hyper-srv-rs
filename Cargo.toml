@@ -1,8 +1,8 @@
 [package]
 name = "hyper-srv"
 description = "A wrapper around Hyper's connector with ability to preresolve SRV DNS records."
-edition = "2018"
-version = "0.4.0"
+edition = "2021"
+version = "0.4.1"
 authors = ["Eugene Palmoff <mahou@shoujo.pw>"]
 license = "MIT"
 repository = "https://github.com/mahou-shoujo/hyper-srv-rs.git"
@@ -13,10 +13,8 @@ keywords = ["http", "hyper", "hyperium", "dns", "srv"]
 
 [dependencies]
 futures = "0.3"
-http = "0.2"
 hyper = { version = "0.14", features = ["client"] }
 tokio = "1"
-trust-dns-proto = "0.20"
 trust-dns-resolver = "0.20"
 
 [dev-dependencies]
