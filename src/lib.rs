@@ -9,7 +9,31 @@
 //! 3) Use the first record resolved to create a new destination (`A`/`AAAA`) and
 //! finally pass it to the underlying connector.
 
-#![deny(missing_docs)]
+#![warn(
+    absolute_paths_not_starting_with_crate,
+    meta_variable_misuse,
+    missing_debug_implementations,
+    missing_docs,
+    noop_method_call,
+    pointer_structural_match,
+    unreachable_pub,
+    unused_crate_dependencies,
+    unused_lifetimes,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::checked_conversions,
+    clippy::cognitive_complexity,
+    clippy::exhaustive_enums,
+    clippy::exhaustive_structs,
+    clippy::future_not_send,
+    clippy::inconsistent_struct_constructor,
+    clippy::inefficient_to_string,
+    clippy::use_debug,
+    clippy::use_self
+)]
 
 use futures::{
     future::BoxFuture,
@@ -85,7 +109,7 @@ impl<C> ServiceConnector<C> {
     ///
     /// [`ServiceConnector`]: struct.ServiceConnector.html
     pub fn new(inner: C, resolver: Option<TokioAsyncResolver>) -> Self {
-        ServiceConnector {
+        Self {
             resolver,
             inner,
         }
@@ -94,7 +118,7 @@ impl<C> ServiceConnector<C> {
 
 #[derive(Debug)]
 enum ServiceErrorKind {
-    Resolve(ResolveError),
+    Resolve(Box<ResolveError>),
     Inner(Box<dyn Error + Send + Sync>),
 }
 
@@ -106,7 +130,7 @@ pub struct ServiceError(ServiceErrorKind);
 
 impl From<ResolveError> for ServiceError {
     fn from(error: ResolveError) -> Self {
-        ServiceError(ServiceErrorKind::Resolve(error))
+        Self(ServiceErrorKind::Resolve(Box::new(error)))
     }
 }
 
@@ -133,7 +157,7 @@ impl ServiceError {
     where
         E: Into<Box<dyn Error + Send + Sync>>,
     {
-        ServiceError(ServiceErrorKind::Inner(inner.into()))
+        Self(ServiceErrorKind::Inner(inner.into()))
     }
 }
 
@@ -189,7 +213,7 @@ where
                         ResolveErrorKind::NoRecordsFound {
                             ..
                         } => Ok(None),
-                        _unexpected => Err(ServiceError(ServiceErrorKind::Resolve(err))),
+                        _unexpected => Err(ServiceError(ServiceErrorKind::Resolve(Box::new(err)))),
                     }
                 })?;
                 let uri = match response.as_ref().and_then(|response| response.iter().next()) {
@@ -209,7 +233,7 @@ where
                     None => uri,
                 };
                 {
-                    *self = ServiceConnecting(ServiceConnectingKind::Inner {
+                    *self = Self(ServiceConnectingKind::Inner {
                         fut: inner.call(uri),
                     });
                 }
