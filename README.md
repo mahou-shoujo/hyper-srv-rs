@@ -1,5 +1,5 @@
 ﻿## Hyper SRV connector
-![Build Status](https://github.com/github/docs/actions/workflows/rust.yml/badge.svg)
+[![Build Status](https://github.com/mahou-shoujo/hyper-srv-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/mahou-shoujo/hyper-srv-rs/actions/workflows/rust.yml)
 
 This crate provides a wrapper around Hyper's connector with ability to preresolve SRV DNS records
 before supplying resulting `host:port` pair to the underlying connector.
