@@ -1,6 +1,6 @@
+use hickory_resolver::AsyncResolver;
 use hyper::{client::HttpConnector, Body, Client, StatusCode, Uri};
 use hyper_srv::ServiceConnector;
-use trust_dns_resolver::AsyncResolver;
 
 #[tokio::main]
 pub async fn main() {

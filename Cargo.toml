@@ -13,9 +13,9 @@ keywords = ["http", "hyper", "hyperium", "dns", "srv"]
 
 [dependencies]
 futures = "0.3"
+hickory-resolver = "0.24"
 hyper = { version = "0.14", features = ["client"] }
 tokio = "1"
-trust-dns-resolver = "0.23"
 
 [dev-dependencies]
 hyper = { version = "0.14", features = ["client", "tcp", "http1", "http2"] }

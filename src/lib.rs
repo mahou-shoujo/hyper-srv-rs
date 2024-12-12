@@ -40,14 +40,14 @@ use futures::{
     task::{Context, Poll},
     Future,
 };
-use hyper::{client::connect::Connection, service::Service, Uri};
-use std::{error::Error, fmt, pin::Pin};
-use tokio::io::{AsyncRead, AsyncWrite};
-use trust_dns_resolver::{
+use hickory_resolver::{
     error::{ResolveError, ResolveErrorKind},
     lookup::SrvLookup,
     TokioAsyncResolver,
 };
+use hyper::{client::connect::Connection, service::Service, Uri};
+use std::{error::Error, fmt, pin::Pin};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A wrapper around Hyper's [`Connect`]or with ability to preresolve SRV DNS records
 /// before supplying resulting `host:port` pair to the underlying connector.
