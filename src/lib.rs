@@ -77,23 +77,19 @@ where
 
     fn call(&mut self, uri: Uri) -> Self::Future {
         let fut = match (&self.resolver, uri.host(), uri.port()) {
-            (Some(resolver), Some(_), None) => {
-                ServiceConnectingKind::Preresolve {
-                    inner: self.inner.clone(),
-                    fut: {
-                        let resolver = resolver.clone();
-                        Box::pin(async move {
-                            let host = uri.host().expect("host was right here, now it is gone");
-                            let resolved = resolver.srv_lookup(host).await;
-                            (resolved, uri)
-                        })
-                    },
-                }
+            (Some(resolver), Some(_), None) => ServiceConnectingKind::Preresolve {
+                inner: self.inner.clone(),
+                fut: {
+                    let resolver = resolver.clone();
+                    Box::pin(async move {
+                        let host = uri.host().expect("host was right here, now it is gone");
+                        let resolved = resolver.srv_lookup(host).await;
+                        (resolved, uri)
+                    })
+                },
             },
-            _ => {
-                ServiceConnectingKind::Inner {
-                    fut: self.inner.call(uri),
-                }
+            _ => ServiceConnectingKind::Inner {
+                fut: self.inner.call(uri),
             },
         };
         ServiceConnecting(fut)
@@ -109,10 +105,7 @@ impl<C> ServiceConnector<C> {
     ///
     /// [`ServiceConnector`]: struct.ServiceConnector.html
     pub fn new(inner: C, resolver: Option<TokioAsyncResolver>) -> Self {
-        Self {
-            resolver,
-            inner,
-        }
+        Self { resolver, inner }
     }
 }
 
@@ -203,20 +196,16 @@ where
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         match &mut self.0 {
-            ServiceConnectingKind::Preresolve {
-                inner,
-                fut,
-            } => {
+            ServiceConnectingKind::Preresolve { inner, fut } => {
                 let (res, uri) = ready!(Pin::new(fut).poll(ctx));
-                let response = res.map(Some).or_else(|err| {
-                    match err.kind() {
-                        ResolveErrorKind::NoRecordsFound {
-                            ..
-                        } => Ok(None),
-                        _unexpected => Err(ServiceError(ServiceErrorKind::Resolve(Box::new(err)))),
-                    }
+                let response = res.map(Some).or_else(|err| match err.kind() {
+                    ResolveErrorKind::NoRecordsFound { .. } => Ok(None),
+                    _unexpected => Err(ServiceError(ServiceErrorKind::Resolve(Box::new(err)))),
                 })?;
-                let uri = match response.as_ref().and_then(|response| response.iter().next()) {
+                let uri = match response
+                    .as_ref()
+                    .and_then(|response| response.iter().next())
+                {
                     Some(srv) => {
                         let authority = format!("{}:{}", srv.target(), srv.port());
                         let builder = Uri::builder().authority(authority.as_str());
@@ -229,7 +218,7 @@ where
                             None => builder,
                         };
                         builder.build().map_err(ServiceError::inner)?
-                    },
+                    }
                     None => uri,
                 };
                 {
@@ -238,10 +227,10 @@ where
                     });
                 }
                 self.poll(ctx)
-            },
-            ServiceConnectingKind::Inner {
-                fut,
-            } => Pin::new(fut).poll(ctx).map_err(ServiceError::inner),
+            }
+            ServiceConnectingKind::Inner { fut } => {
+                Pin::new(fut).poll(ctx).map_err(ServiceError::inner)
+            }
         }
     }
 }
