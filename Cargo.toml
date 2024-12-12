@@ -2,7 +2,7 @@
 name = "hyper-srv"
 description = "A wrapper around Hyper's connector with ability to preresolve SRV DNS records."
 edition = "2021"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Eugene Palmoff <mahou@shoujo.pw>"]
 license = "MIT"
 repository = "https://github.com/mahou-shoujo/hyper-srv-rs.git"
