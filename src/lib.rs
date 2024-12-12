@@ -15,7 +15,6 @@
     missing_debug_implementations,
     missing_docs,
     noop_method_call,
-    pointer_structural_match,
     unreachable_pub,
     unused_crate_dependencies,
     unused_lifetimes,
